@@ -2,14 +2,12 @@ package treelock
 
 import (
 	"sort"
-	"strings"
 	"sync"
 )
 
 type TreeLock struct {
 	totalLock *sync.Mutex
 	totalwg   *sync.WaitGroup
-	sep       rune
 	locks     map[string]*TreeLock
 }
 
@@ -19,89 +17,72 @@ type SimpleTreeLock struct {
 	locks     map[string]*sync.Mutex
 }
 
-// Create a new tree lock with the separator 'sep'
-func NewTreeLock(sep rune) *TreeLock {
-	return &TreeLock{new(sync.Mutex), new(sync.WaitGroup), sep, make(map[string]*TreeLock)}
+type Sorter [][]string
+
+func (S Sorter) Len() int { return len(S) }
+func (S Sorter) Less(i, j int) bool {
+	s := len(S[i]) < len(S[j])
+	m := len(S[j])
+	if s {
+		m = len(S[i])
+	}
+	for k := 0; k < m; k++ {
+		if S[i][k] < S[j][k] {
+			return true
+		} else if S[i][k] > S[j][k] {
+			return false
+		}
+	}
+	return s
+}
+func (S Sorter) Swap(i, j int) { S[i], S[j] = S[j], S[i] }
+
+// Create a new tree lock
+func NewTreeLock() *TreeLock {
+	return &TreeLock{new(sync.Mutex), new(sync.WaitGroup), make(map[string]*TreeLock)}
 }
 
 // Safely lock a value to prevent threads from accessing this value
-func (T TreeLock) Lock(val string) {
-	b := strings.IndexRune(val, T.sep)
+func (T TreeLock) Lock(val []string) {
+	if len(val) == 0 {
+		T.LockAll()
+		return
+	}
 	T.totalLock.Lock()
-	if b == -1 {
-		if _, ok := T.locks[val]; !ok {
-			T.locks[val] = NewTreeLock(T.sep)
-		}
-	} else {
-		if _, ok := T.locks[val[:b]]; !ok {
-			T.locks[val[:b]] = NewTreeLock(T.sep)
-		}
+	if _, ok := T.locks[val[0]]; !ok {
+		T.locks[val[0]] = NewTreeLock()
 	}
 	T.totalwg.Add(1)
 	T.totalLock.Unlock()
-	if b == -1 {
-		T.locks[val].LockAll()
-	} else {
-		T.locks[val[:b]].Lock(val[b+1:])
-	}
+	T.locks[val[0]].Lock(val[1:])
 }
 
 // Unlock a value to allow it to be used by another thread.
 // Will panic if the value is not locked
-func (T TreeLock) Unlock(val string) {
-	T.totalwg.Done()
-	b := strings.IndexRune(val, T.sep)
-	if b == -1 {
-		T.locks[val].UnlockAll()
-	} else {
-		T.locks[val[:b]].Unlock(val[b+1:])
+func (T TreeLock) Unlock(val []string) {
+	if len(val) == 0 {
+		T.UnlockAll()
+		return
 	}
+	T.totalwg.Done()
+	T.locks[val[0]].Unlock(val[1:])
 }
 
 // Safely lock multiple values simultaneously while preventing race condition
-func (T TreeLock) LockMany(vals ...string) {
-	sort.Strings(vals)
-	bmap := map[string]int{}
+// Use this if the same thread will need to have multiple values locked
+// Attempting to lock overlapping values will deadlock
+func (T TreeLock) LockMany(vals ...[]string) {
+	sort.Sort(Sorter(vals))
 	for _, val := range vals {
-		bmap[val] = strings.IndexRune(val, T.sep)
-	}
-	T.totalLock.Lock()
-	for _, val := range vals {
-		b := bmap[val]
-		if b == -1 {
-			if _, ok := T.locks[val]; !ok {
-				T.locks[val] = NewTreeLock(T.sep)
-			}
-		} else {
-			if _, ok := T.locks[val[:b]]; !ok {
-				T.locks[val[:b]] = NewTreeLock(T.sep)
-			}
-		}
-	}
-	T.totalwg.Add(len(vals))
-	T.totalLock.Unlock()
-	for _, val := range vals {
-		b := bmap[val]
-		if b == -1 {
-			T.locks[val].LockAll()
-		} else {
-			T.locks[val[:b]].Lock(val[b+1:])
-		}
+		T.Lock(val)
 	}
 }
 
 // Safely unlock multiple values simultaneously while preventing race condition
-func (T TreeLock) UnlockMany(vals ...string) {
-	sort.Strings(vals)
+func (T TreeLock) UnlockMany(vals ...[]string) {
+	sort.Sort(Sorter(vals))
 	for i := len(vals) - 1; i >= 0; i-- {
-		val := vals[i]
-		b := strings.IndexRune(val, T.sep)
-		if b == -1 {
-			T.locks[val].UnlockAll()
-		} else {
-			T.locks[val[:b]].Unlock(val[b+1:])
-		}
-		T.totalwg.Done()
+		T.Unlock(vals[i])
 	}
 }
 
