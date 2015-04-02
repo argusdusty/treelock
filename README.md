@@ -20,6 +20,7 @@ This allows you to minimize overhead in asynchronous access to a large number of
 ### SimpleTreeLock ###
 
 The SimpleTreeLock structure is the same as TreeLock, except limited to depth=1, so it's more of a MapLock:
+
 * Lock a single item: `simpletreelock.Lock("asdf")`
 * Lock multiple items: `simpletreelock.LockMany("asdf", "1234")`
 * Lock everything: `simpletreelock.LockAll()`
