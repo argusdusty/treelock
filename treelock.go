@@ -5,17 +5,32 @@ import (
 	"sync"
 )
 
+type WaitGroup interface {
+	Add(delta int)
+	Wait()
+	Done()
+}
+
 type TreeLock struct {
-	totalLock *sync.Mutex
-	totalwg   *sync.WaitGroup
+	totalLock sync.Locker
+	totalwg   WaitGroup
 	locks     map[string]*TreeLock
+	val       string
+	parent    *TreeLock
+	depth     int
 }
 
 type SimpleTreeLock struct {
-	totalLock *sync.Mutex
-	totalwg   *sync.WaitGroup
-	locks     map[string]*sync.Mutex
+	totalLock sync.Locker
+	totalwg   WaitGroup
+	locks     map[string]sync.Locker
 }
+
+// Global function supporting custom Mutex/WaitGroup generators.
+// For example, allowing global treeLocks by handling locks through a database.
+// Or alternatively, enabling callbacks when locking/unlocking occurs
+var MutexGenerator func(path []string) sync.Locker = func(path []string) sync.Locker { return new(sync.Mutex) }
+var WaitGroupGenerator func(path []string) WaitGroup = func(path []string) WaitGroup { return new(sync.WaitGroup) }
 
 type Sorter [][]string
 
@@ -39,18 +54,30 @@ func (S Sorter) Swap(i, j int) { S[i], S[j] = S[j], S[i] }
 
 // Create a new tree lock
 func NewTreeLock() *TreeLock {
-	return &TreeLock{new(sync.Mutex), new(sync.WaitGroup), make(map[string]*TreeLock)}
+	return &TreeLock{MutexGenerator([]string{}), WaitGroupGenerator([]string{}), make(map[string]*TreeLock), "", nil, 0}
+}
+
+func newTreeLock(val string, parent *TreeLock, depth int) *TreeLock {
+	path := make([]string, depth)
+	i := depth - 1
+	pt := parent
+	for pt.parent != nil && i >= 0 {
+		path[i] = pt.val
+		i--
+		pt = pt.parent
+	}
+	return &TreeLock{MutexGenerator(path), WaitGroupGenerator(path), make(map[string]*TreeLock), val, nil, depth}
 }
 
 // Safely lock a value to prevent threads from accessing this value
-func (T TreeLock) Lock(val []string) {
+func (T *TreeLock) Lock(val []string) {
 	if len(val) == 0 {
 		T.LockAll()
 		return
 	}
 	T.totalLock.Lock()
 	if _, ok := T.locks[val[0]]; !ok {
-		T.locks[val[0]] = NewTreeLock()
+		T.locks[val[0]] = newTreeLock(val[0], T, T.depth+1)
 	}
 	T.totalwg.Add(1)
 	T.totalLock.Unlock()
@@ -59,7 +86,7 @@ func (T TreeLock) Lock(val []string) {
 
 // Unlock a value to allow it to be used by another thread.
 // Will panic if the value is not locked
-func (T TreeLock) Unlock(val []string) {
+func (T *TreeLock) Unlock(val []string) {
 	if len(val) == 0 {
 		T.UnlockAll()
 		return
@@ -71,7 +98,7 @@ func (T TreeLock) Unlock(val []string) {
 // Safely lock multiple values simultaneously while preventing race condition
 // Use this if the same thread will need to have multiple values locked
 // Attempting to lock overlapping values will deadlock
-func (T TreeLock) LockMany(vals ...[]string) {
+func (T *TreeLock) LockMany(vals ...[]string) {
 	sort.Sort(Sorter(vals))
 	for _, val := range vals {
 		T.Lock(val)
@@ -79,7 +106,7 @@ func (T TreeLock) LockMany(vals ...[]string) {
 }
 
 // Safely unlock multiple values simultaneously while preventing race condition
-func (T TreeLock) UnlockMany(vals ...[]string) {
+func (T *TreeLock) UnlockMany(vals ...[]string) {
 	sort.Sort(Sorter(vals))
 	for i := len(vals) - 1; i >= 0; i-- {
 		T.Unlock(vals[i])
@@ -87,42 +114,42 @@ func (T TreeLock) UnlockMany(vals ...[]string) {
 }
 
 // Lock the entire tree, waits for all existing locks to unlock first.
-func (T TreeLock) LockAll() {
+func (T *TreeLock) LockAll() {
 	T.totalLock.Lock()
 	T.totalwg.Wait()
 }
 
 // Unlock a lock on the entire tree
-func (T TreeLock) UnlockAll() {
+func (T *TreeLock) UnlockAll() {
 	T.totalLock.Unlock()
 }
 
 // Equivalent to a TreeLock restricted to depth=1
 func NewSimpleTreeLock() *SimpleTreeLock {
-	return &SimpleTreeLock{new(sync.Mutex), new(sync.WaitGroup), make(map[string]*sync.Mutex)}
+	return &SimpleTreeLock{MutexGenerator([]string{}), WaitGroupGenerator([]string{}), make(map[string]sync.Locker)}
 }
 
-func (T SimpleTreeLock) Lock(val string) {
+func (T *SimpleTreeLock) Lock(val string) {
 	T.totalLock.Lock()
 	if _, ok := T.locks[val]; !ok {
-		T.locks[val] = new(sync.Mutex)
+		T.locks[val] = MutexGenerator([]string{val})
 	}
 	T.totalwg.Add(1)
 	T.totalLock.Unlock()
 	T.locks[val].Lock()
 }
 
-func (T SimpleTreeLock) Unlock(val string) {
+func (T *SimpleTreeLock) Unlock(val string) {
 	T.totalwg.Done()
 	T.locks[val].Unlock()
 }
 
-func (T SimpleTreeLock) LockMany(vals ...string) {
+func (T *SimpleTreeLock) LockMany(vals ...string) {
 	sort.Strings(vals)
 	T.totalLock.Lock()
 	for _, val := range vals {
 		if _, ok := T.locks[val]; !ok {
-			T.locks[val] = new(sync.Mutex)
+			T.locks[val] = MutexGenerator([]string{val})
 		}
 	}
 	T.totalwg.Add(len(vals))
@@ -132,7 +159,7 @@ func (T SimpleTreeLock) LockMany(vals ...string) {
 	}
 }
 
-func (T SimpleTreeLock) UnlockMany(vals ...string) {
+func (T *SimpleTreeLock) UnlockMany(vals ...string) {
 	sort.Strings(vals)
 	for i := len(vals) - 1; i >= 0; i-- {
 		T.locks[vals[i]].Unlock()
@@ -140,7 +167,7 @@ func (T SimpleTreeLock) UnlockMany(vals ...string) {
 	}
 }
 
-func (T SimpleTreeLock) LockAll() {
+func (T *SimpleTreeLock) LockAll() {
 	T.totalLock.Lock()
 	T.totalwg.Wait()
 }
