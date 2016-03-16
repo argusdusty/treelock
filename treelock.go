@@ -15,6 +15,7 @@ type TreeLock struct {
 	totalLock sync.Locker
 	totalwg   WaitGroup
 	locks     map[string]*TreeLock
+	locksLock sync.Locker
 	val       string
 	parent    *TreeLock
 	depth     int
@@ -24,6 +25,7 @@ type SimpleTreeLock struct {
 	totalLock sync.Locker
 	totalwg   WaitGroup
 	locks     map[string]sync.Locker
+	locksLock sync.Locker
 }
 
 // Global function supporting custom Mutex/WaitGroup generators.
@@ -54,7 +56,7 @@ func (S Sorter) Swap(i, j int) { S[i], S[j] = S[j], S[i] }
 
 // Create a new tree lock
 func NewTreeLock() *TreeLock {
-	return &TreeLock{MutexGenerator([]string{}), WaitGroupGenerator([]string{}), make(map[string]*TreeLock), "", nil, 0}
+	return &TreeLock{MutexGenerator([]string{}), WaitGroupGenerator([]string{}), make(map[string]*TreeLock), new(sync.Mutex), "", nil, 0}
 }
 
 func newTreeLock(val string, parent *TreeLock, depth int) *TreeLock {
@@ -66,7 +68,7 @@ func newTreeLock(val string, parent *TreeLock, depth int) *TreeLock {
 		i--
 		pt = pt.parent
 	}
-	return &TreeLock{MutexGenerator(path), WaitGroupGenerator(path), make(map[string]*TreeLock), val, nil, depth}
+	return &TreeLock{MutexGenerator(path), WaitGroupGenerator(path), make(map[string]*TreeLock), new(sync.Mutex), val, nil, depth}
 }
 
 // Safely lock a value to prevent threads from accessing this value
@@ -76,12 +78,15 @@ func (T *TreeLock) Lock(val []string) {
 		return
 	}
 	T.totalLock.Lock()
+	T.locksLock.Lock()
 	if _, ok := T.locks[val[0]]; !ok {
 		T.locks[val[0]] = newTreeLock(val[0], T, T.depth+1)
 	}
+	lock := T.locks[val[0]]
+	T.locksLock.Unlock()
 	T.totalwg.Add(1)
 	T.totalLock.Unlock()
-	T.locks[val[0]].Lock(val[1:])
+	lock.Lock(val[1:])
 }
 
 // Unlock a value to allow it to be used by another thread.
@@ -92,7 +97,10 @@ func (T *TreeLock) Unlock(val []string) {
 		return
 	}
 	T.totalwg.Done()
-	T.locks[val[0]].Unlock(val[1:])
+	T.locksLock.Lock()
+	lock := T.locks[val[0]]
+	T.locksLock.Unlock()
+	lock.Unlock(val[1:])
 }
 
 // Safely lock multiple values simultaneously while preventing race condition
@@ -126,7 +134,7 @@ func (T *TreeLock) UnlockAll() {
 
 // Equivalent to a TreeLock restricted to depth=1
 func NewSimpleTreeLock() *SimpleTreeLock {
-	return &SimpleTreeLock{MutexGenerator([]string{}), WaitGroupGenerator([]string{}), make(map[string]sync.Locker)}
+	return &SimpleTreeLock{MutexGenerator([]string{}), WaitGroupGenerator([]string{}), make(map[string]sync.Locker), new(sync.Mutex)}
 }
 
 func (T *SimpleTreeLock) Lock(val string) {
