@@ -36,7 +36,6 @@ var WaitGroupGenerator func(path []string) WaitGroup = func(path []string) WaitG
 
 type Sorter [][]string
 
-func (S Sorter) Len() int { return len(S) }
 func (S Sorter) Less(i, j int) bool {
 	s := len(S[i]) < len(S[j])
 	m := len(S[j])
@@ -52,7 +51,6 @@ func (S Sorter) Less(i, j int) bool {
 	}
 	return s
 }
-func (S Sorter) Swap(i, j int) { S[i], S[j] = S[j], S[i] }
 
 // Create a new tree lock
 func NewTreeLock() *TreeLock {
@@ -107,7 +105,7 @@ func (T *TreeLock) Unlock(val []string) {
 // Use this if the same thread will need to have multiple values locked
 // Attempting to lock overlapping values will deadlock
 func (T *TreeLock) LockMany(vals ...[]string) {
-	sort.Sort(Sorter(vals))
+	sort.SliceStable(vals, Sorter(vals).Less)
 	for _, val := range vals {
 		T.Lock(val)
 	}
@@ -115,7 +113,7 @@ func (T *TreeLock) LockMany(vals ...[]string) {
 
 // Safely unlock multiple values simultaneously while preventing race condition
 func (T *TreeLock) UnlockMany(vals ...[]string) {
-	sort.Sort(Sorter(vals))
+	sort.SliceStable(vals, Sorter(vals).Less)
 	for i := len(vals) - 1; i >= 0; i-- {
 		T.Unlock(vals[i])
 	}
@@ -143,13 +141,17 @@ func (T *SimpleTreeLock) Lock(val string) {
 		T.locks[val] = MutexGenerator([]string{val})
 	}
 	T.totalwg.Add(1)
+	lock := T.locks[val]
 	T.totalLock.Unlock()
-	T.locks[val].Lock()
+	lock.Lock()
 }
 
 func (T *SimpleTreeLock) Unlock(val string) {
 	T.totalwg.Done()
-	T.locks[val].Unlock()
+	T.totalLock.Lock()
+	lock := T.locks[val]
+	T.totalLock.Unlock()
+	lock.Unlock()
 }
 
 func (T *SimpleTreeLock) LockMany(vals ...string) {
@@ -161,17 +163,30 @@ func (T *SimpleTreeLock) LockMany(vals ...string) {
 		}
 	}
 	T.totalwg.Add(len(vals))
+	locks := make([]sync.Locker, len(vals))
+	for i, val := range vals {
+		locks[i] = T.locks[val]
+	}
 	T.totalLock.Unlock()
-	for _, val := range vals {
-		T.locks[val].Lock()
+	for _, lock := range locks {
+		lock.Lock()
 	}
 }
 
 func (T *SimpleTreeLock) UnlockMany(vals ...string) {
 	sort.Strings(vals)
+	T.totalLock.Lock()
 	for i := len(vals) - 1; i >= 0; i-- {
 		T.locks[vals[i]].Unlock()
 		T.totalwg.Done()
+	}
+	locks := make([]sync.Locker, len(vals))
+	for i, val := range vals {
+		locks[i] = T.locks[val]
+	}
+	T.totalLock.Unlock()
+	for _, lock := range locks {
+		lock.Unlock()
 	}
 }
 
